@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-# Copyright 2017-2018 ACSONE SA/NV
+# Copyright 2017 ACSONE SA/NV
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 {
     "name": "MIS Builder Demo",
     "summary": """
         Demo addon for MIS Builder""",
-    "version": "10.0.3.1.0",
+    "version": "10.0.3.1.1",
     "license": "AGPL-3",
     "author": "ACSONE SA/NV, " "Odoo Community Association (OCA)",
     "website": "https://github.com/OCA/mis-builder",

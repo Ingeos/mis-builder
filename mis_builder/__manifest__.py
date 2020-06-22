@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-# Copyright 2014-2018 ACSONE SA/NV (<http://acsone.eu>)
+# Copyright 2014 ACSONE SA/NV (<http://acsone.eu>)
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl.html).
 
 {
     "name": "MIS Builder",
-    "version": "10.0.3.5.0",
+    "version": "10.0.3.6.1",
     "category": "Reporting",
     "summary": """
         Build 'Management Information System' Reports and Dashboards
