@@ -2,6 +2,7 @@
 # Copyright 2020 CorporateHub (https://corporatehub.eu)
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl.html).
 
+import ast
 import datetime
 import logging
 
@@ -255,6 +256,9 @@ class MisReportInstancePeriod(models.Model):
             ("field_id.name", "=", "company_id"),
             ("field_id.model_id.model", "!=", "account.move.line"),
         ],
+        compute="_compute_source_aml_model_id",
+        store=True,
+        readonly=False,
         help="A 'move line like' model, ie having at least debit, credit, "
         "date, account_id and company_id fields.",
     )
@@ -304,6 +308,10 @@ class MisReportInstancePeriod(models.Model):
             "and cannot be modified in the preview."
         ),
     )
+    analytic_domain = fields.Text(
+        default="[]",
+        help="A domain to additionally filter move lines considered in this column.",
+    )
 
     _order = "sequence, id"
 
@@ -321,6 +329,26 @@ class MisReportInstancePeriod(models.Model):
         ),
     ]
 
+    @api.depends("source", "report_instance_id.report_id.move_lines_source")
+    def _compute_source_aml_model_id(self):
+        for record in self:
+            if record.source == SRC_ACTUALS:
+                if not record.report_instance_id.report_id:
+                    raise UserError(
+                        _(
+                            "Please select a report template and/or "
+                            "save the report before adding columns."
+                        )
+                    )
+                # use the default model defined on the report template
+                record.source_aml_model_id = (
+                    record.report_instance_id.report_id.move_lines_source
+                )
+            elif record.source in (SRC_SUMCOL, SRC_CMPCOL):
+                record.source_aml_model_id = False
+            elif record.source == SRC_ACTUALS_ALT:
+                pass  # let the user choose
+
     @api.depends("report_instance_id")
     def _compute_allowed_cmpcol_ids(self):
         """Compute actual records while in NewId context"""
@@ -331,9 +359,11 @@ class MisReportInstancePeriod(models.Model):
     def _check_source_aml_model_id(self):
         for record in self:
             if record.source_aml_model_id:
-                record_model = record.source_aml_model_id.field_id.filtered(
-                    lambda r: r.name == "account_id"
-                ).relation
+                record_model = (
+                    record.source_aml_model_id.sudo()
+                    .field_id.filtered(lambda r: r.name == "account_id")
+                    .relation
+                )
                 report_account_model = record.report_id.account_model
                 if record_model != report_account_model:
                     raise ValidationError(
@@ -365,6 +395,9 @@ class MisReportInstancePeriod(models.Model):
     def _onchange_source(self):
         if self.source in (SRC_SUMCOL, SRC_CMPCOL):
             self.mode = MODE_NONE
+        # Dirty hack to solve bug https://github.com/OCA/mis-builder/issues/393
+        if self.source and not self.report_instance_id.id:
+            self.report_instance_id = self.report_instance_id._origin.id
 
     def _get_aml_model_name(self):
         self.ensure_one()
@@ -390,6 +423,11 @@ class MisReportInstancePeriod(models.Model):
                         filters.append((filter_name, "in", [m]))
                 else:
                     filters.append((filter_name, operator, value))
+        # report-level analytic domain filter
+        if self.analytic_domain:
+            filters.extend(ast.literal_eval(self.analytic_domain))
+        # contextual analytic domain filter
+        filters.extend(self.env.context.get("mis_analytic_domain", []))
         return filters
 
     def _get_additional_move_line_filter(self):
@@ -425,6 +463,9 @@ class MisReportInstancePeriod(models.Model):
             )
         for tag in self.analytic_tag_ids:
             domain.append(("analytic_tag_ids", "=", tag.id))
+        if self.analytic_domain:
+            # Extend the domain with the column-level analytic domain
+            domain.extend(ast.literal_eval(self.analytic_domain))
         return domain
 
     def _get_additional_query_filter(self, query):
@@ -578,6 +619,25 @@ class MisReportInstance(models.Model):
         comodel_name="account.analytic.tag", string="Analytic Tags"
     )
     hide_analytic_filters = fields.Boolean(default=True)
+    source_aml_model_id = fields.Many2one(
+        related="report_id.move_lines_source",
+        readonly=True,
+    )
+    source_aml_model_name = fields.Char(
+        related="source_aml_model_id.model",
+        related_sudo=True,
+        readonly=True,
+    )
+    analytic_domain = fields.Text(
+        default="[]",
+        help=(
+            "A domain to additionally filter move lines considered in this report. "
+            "Caution: when using different move line sources in different columns, "
+            "such as budgets by account, "
+            "make sure to use only fields that are available in "
+            "all move line sources."
+        ),
+    )
 
     @api.onchange("multi_company")
     def _onchange_company(self):
@@ -587,7 +647,7 @@ class MisReportInstance(models.Model):
         else:
             prev = self.company_ids.ids
             company = False
-            if self.env.company.id in prev:
+            if self.env.company.id in prev or not prev:
                 company = self.env.company
             else:
                 for c_id in prev:
@@ -630,15 +690,11 @@ class MisReportInstance(models.Model):
             filter_descriptions.append(
                 _("Analytic Account Group: %s") % analytic_group.display_name
             )
-        analytic_tag_value = filters.get("analytic_tag_ids", {}).get("value")
-        if analytic_tag_value:
-            # TODO 14 we need a test to cover this
-            analytic_tag_names = self.resolve_2many_commands(
-                "analytic_tag_ids", analytic_tag_value, ["name"]
-            )
+        analytic_tag_ids = filters.get("analytic_tag_ids", {}).get("value")
+        if analytic_tag_ids:
+            analytic_tags = self.env["account.analytic.tag"].browse(analytic_tag_ids)
             filter_descriptions.append(
-                _("Analytic Tags: %s")
-                % ", ".join([rec["name"] for rec in analytic_tag_names])
+                _("Analytic Tags: %s") % ", ".join(analytic_tags.mapped("name"))
             )
         return filter_descriptions
 
@@ -727,6 +783,7 @@ class MisReportInstance(models.Model):
                 "value": self.analytic_tag_ids.ids,
                 "operator": "all",
             }
+        context["mis_analytic_domain"] = ast.literal_eval(self.analytic_domain)
 
     def _context_with_filters(self):
         self.ensure_one()
@@ -892,7 +949,7 @@ class MisReportInstance(models.Model):
                 "domain": domain,
                 "type": "ir.actions.act_window",
                 "res_model": period._get_aml_model_name(),
-                "views": [[False, "list"], [False, "form"]],
+                "views": [[False, "list"], [False, "form"], [False, "pivot"]],
                 "view_mode": "list",
                 "target": "current",
                 "context": {"active_test": False},
